@@ -11,6 +11,7 @@ type TabType = 'de' | 'product';
 function App() {
   const [deFile, setDeFile] = React.useState<FileData | null>(null);
   const [productFile, setProductFile] = React.useState<FileData | null>(null);
+  const [barcodeFile, setBarcodeFile] = React.useState<FileData | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [activeTab, setActiveTab] = React.useState<TabType>('de');
   const [isProcessed, setIsProcessed] = React.useState(false);
@@ -19,32 +20,39 @@ function App() {
   const [dbInitialized, setDbInitialized] = React.useState(false);
   const [isMerging, setIsMerging] = React.useState(false);
   const [mergedData, setMergedData] = React.useState<any[] | null>(null);
+  const [barcodeData, setBarcodeData] = React.useState<any[] | null>(null);
   const tabsRef = React.useRef<HTMLDivElement>(null);
   const mergedDataRef = React.useRef<HTMLDivElement>(null);
 
   const normalizeSKU = (sku: string): string => {
     if (!sku) return '';
     let normalized = sku.trim();
-    // Remove B34 prefix if it exists
-    if (normalized.startsWith('B34')) {
-      normalized = normalized.slice(3);
+    // Remove B34 prefix if it exists (case insensitive)
+    const prefixMatch = normalized.match(/^b34/i);
+    if (prefixMatch) {
+      normalized = normalized.slice(prefixMatch[0].length);
     }
-    // Remove V1 suffix if it exists
-    if (normalized.endsWith('V1')) {
-      normalized = normalized.slice(0, -2);
+    // Remove V1 suffix if it exists (case insensitive)
+    const suffixMatch = normalized.match(/v1$/i);
+    if (suffixMatch) {
+      normalized = normalized.slice(0, -suffixMatch[0].length);
     }
-    return normalized;
+    return normalized.trim();
   };
 
   const handleUniqueDE = (row: any) => {
+    const normalizedSKU = normalizeSKU(row.SKU);
     const { Description, ...rest } = row;
     return {
       ...rest,
-      Description: row['Description 1'] || ''
+      SKU: normalizedSKU,
+      Description: row['Description 1'] || '',
+      Barcode: ''
     };
   };
 
   const handleUniqueProduct = (row: any) => {
+    const normalizedSKU = normalizeSKU(row.SKU);
     const title = row.Name || '';
     const parts = title.split(' ');
     // Remove brand name (first word) and SKU
@@ -60,7 +68,7 @@ function App() {
     ].filter(Boolean).join('\n\n');
 
     return {
-      SKU: row.SKU,
+      SKU: normalizedSKU,
       EAN: row.EAN,
       Material: row.Material,
       Title: cleanTitle,
@@ -76,6 +84,7 @@ function App() {
       'Volume/CBM': row['Volume/CBM'],
       Color: row.Color,
       Description: descriptions,
+      Barcode: '',
       ...Array.from({ length: 12 }, (_, i) => ({
         [`image${i + 1}`]: row[`image${i + 1}`] || ''
       })).reduce((acc, curr) => ({ ...acc, ...curr }), {})
@@ -83,6 +92,7 @@ function App() {
   };
 
   const mergeRow = (deRow: any, productRow: any) => {
+    const normalizedSKU = normalizeSKU(deRow.SKU);
     const title = productRow.Name || '';
     const parts = title.split(' ');
     const cleanTitle = parts.slice(1).join(' ').replace(productRow.SKU, '').trim();
@@ -95,9 +105,9 @@ function App() {
       productRow['Description 4'],
       productRow['Description 5']
     ].filter(Boolean).join('\n\n');
-
-    return {
-      SKU: deRow.SKU,
+  
+    const mergedRow: any = {
+      SKU: normalizedSKU,
       EAN: deRow.EAN,
       Subcategory: deRow.Category,
       Price: deRow.Price,
@@ -119,11 +129,21 @@ function App() {
         [`image${i + 1}`]: deRow[`image${i + 1}`] || ''
       })).reduce((acc, curr) => ({ ...acc, ...curr }), {})
     };
+ 
+    if (barcodeData) {
+      const barcodeRow = barcodeData.find(row => normalizeSKU(row.SKU || '') === normalizedSKU);
+      if (barcodeRow) {
+        mergedRow.Barcode = barcodeRow.Barcode || barcodeRow.barcode;
+      }
+    }
+ 
+    return mergedRow;
   };
 
-  const mergeFiles = (deData: any[], productData: any[]) => {
+  const mergeFiles = (deData: any[], productData: any[], barcodeData: any[]) => {
     const deIndex = new Map();
     const productIndex = new Map();
+    const barcodeIndex = new Map();
     const merged: any[] = [];
 
     // Index DE data
@@ -142,20 +162,63 @@ function App() {
       }
     });
 
+    // Index Barcode data
+    barcodeData.forEach(row => {
+      // Skip header rows or empty rows
+      if (!row.barcode && !row.Barcode && !row.SKU) return;
+
+      // Handle the different possible column names and normalizations
+      let barcode = row.barcode || row.Barcode;
+      let sku = row.SKU || row.sku;
+      
+      // Handle scientific notation in barcode (like 1.68071E+12)
+      if (barcode && typeof barcode === 'number') {
+        barcode = barcode.toString();
+      }
+
+      // If we have a valid SKU, add it to the index
+      if (sku) {
+        const normalizedSKU = normalizeSKU(sku);
+        if (normalizedSKU) {
+          barcodeIndex.set(normalizedSKU, { ...row, Barcode: barcode });
+        }
+      }
+      // If we don't have a SKU but have a barcode, we'll try to match it later
+      else if (barcode) {
+        // We'll use the barcode as a key in a separate index
+        barcodeIndex.set('barcode_' + barcode, { ...row, Barcode: barcode });
+      }
+    });
+
     // Process matches and DE-only products
     deIndex.forEach((deRow, normalizedSKU) => {
       const productRow = productIndex.get(normalizedSKU);
+      const barcodeRow = barcodeIndex.get(normalizedSKU);
+      
       if (productRow) {
-        merged.push(mergeRow(deRow, productRow));
+        const mergedRow = mergeRow(deRow, productRow);
+        if (barcodeRow) {
+          mergedRow.Barcode = barcodeRow.Barcode;
+        }
+        merged.push(mergedRow);
       } else {
-        merged.push(handleUniqueDE(deRow));
+        const uniqueRow = handleUniqueDE(deRow);
+        if (barcodeRow) {
+          uniqueRow.Barcode = barcodeRow.Barcode;
+        }
+        merged.push(uniqueRow);
       }
     });
 
     // Process Product-only entries
     productIndex.forEach((productRow, normalizedSKU) => {
       if (!deIndex.has(normalizedSKU)) {
-        merged.push(handleUniqueProduct(productRow));
+        const uniqueRow = handleUniqueProduct(productRow);
+        const barcodeRow = barcodeIndex.get(normalizedSKU);
+        if (barcodeRow) {
+          uniqueRow.Barcode = barcodeRow.Barcode;
+        }
+        merged.push(uniqueRow);
       }
     });
 
@@ -172,6 +235,13 @@ function App() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const downloadXLSX = (data: any[]) => {
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "MergedData");
+    XLSX.writeFile(workbook, "merged_data.xlsx");
   };
 
   React.useEffect(() => {
@@ -245,6 +315,8 @@ function App() {
   const handleClear = () => {
     setDeFile(null);
     setProductFile(null);
+    setBarcodeFile(null);
+    setBarcodeData(null);
     setMergedData(null);
     setMergedData(null);
     setIsProcessed(false);
@@ -252,8 +324,10 @@ function App() {
     // Reset file input elements
     const deInput = document.getElementById('de-file') as HTMLInputElement;
     const productInput = document.getElementById('product-file') as HTMLInputElement;
+    const barcodeInput = document.getElementById('barcode-file') as HTMLInputElement;
     if (deInput) deInput.value = '';
     if (productInput) productInput.value = '';
+    if (barcodeInput) barcodeInput.value = '';
   };
 
   const parseFile = async (file: File): Promise<any[]> => {
@@ -344,7 +418,7 @@ function App() {
       name: file.name,
       type: fileType,
       size: file.size,
-    });
+    } as FileData);
   };
 
   const renderTable = (data: any[] | undefined) => {
@@ -664,31 +738,137 @@ function App() {
                 <h2 className="text-lg font-semibold mb-4">Merged Data</h2>
                 {renderTable(mergedData)}
                 <div className="mt-4 flex justify-center">
-                  <button
-                    onClick={() => downloadCSV(mergedData)}
-                    className="flex items-center gap-2 py-3 px-8 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
-                  >
-                    <Download className="w-5 h-5" />
-                    Download CSV
-                  </button>
+                  <div className="relative inline-block">
+                    <button
+                      className="flex items-center gap-2 py-3 px-8 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
+                      onClick={() => {
+                        const dropdown = document.getElementById('download-dropdown');
+                        if (dropdown) {
+                          dropdown.classList.toggle('hidden');
+                        }
+                      }}
+                    >
+                      <Download className="w-5 h-5" />
+                      Download As
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <div id="download-dropdown" className="hidden absolute left-full ml-2 top-0 z-10 w-56 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
+                      <div className="py-1">
+                        <button
+                          onClick={() => {
+                            downloadCSV(mergedData);
+                            document.getElementById('download-dropdown')?.classList.add('hidden');
+                          }}
+                          className="text-gray-700 block w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+                        >
+                          CSV (.csv)
+                        </button>
+                        <button
+                          onClick={() => {
+                            downloadXLSX(mergedData);
+                            document.getElementById('download-dropdown')?.classList.add('hidden');
+                          }}
+                          className="text-gray-700 block w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+                        >
+                          Excel (.xlsx)
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
             {!mergedData && (
               <div className="mt-6 flex justify-center">
+                <input
+                  type="file"
+                  accept=".csv,.xls,.xlsx"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    
+                    const fileType = file.name.split('.').pop()?.toLowerCase();
+                    if (!['csv', 'xls', 'xlsx'].includes(fileType || '')) {
+                      alert('Please upload only CSV, XLS, or XLSX files');
+                      e.target.value = '';
+                      return;
+                    }
+                    
+                    setBarcodeFile({
+                      id: 'productFile',
+                      name: file.name,
+                      type: fileType || '',
+                      size: file.size,
+                    } as FileData);
+                    
+                    try {
+                      const parsedData = await parseFile(file);
+                      // Clean up and normalize barcode data
+                      const cleanedData = parsedData.map(row => {
+                        // Create a normalized object with consistent property names
+                        const cleanRow: any = {};
+                        
+                        // Handle different column name variations
+                        Object.keys(row).forEach(key => {
+                          const lowerKey = key.toLowerCase();
+                          
+                          // Handle barcode field
+                          if (lowerKey.includes('barcode')) {
+                            let barcode = row[key];
+                            // Convert scientific notation to string
+                            if (typeof barcode === 'number') {
+                              barcode = barcode.toString();
+                            }
+                            cleanRow.Barcode = barcode;
+                          } 
+                          // Handle SKU field
+                          else if (lowerKey === 'sku') {
+                            cleanRow.SKU = row[key];
+                          } 
+                          // Copy other fields as is
+                          else {
+                            cleanRow[key] = row[key];
+                          }
+                        });
+                        
+                        return cleanRow;
+                      }).filter(row => row.Barcode || row.SKU); // Filter out empty rows
+                      
+                      setBarcodeData(cleanedData);
+                    } catch (error) {
+                      console.error('Error parsing barcode file:', error);
+                      alert('Error parsing barcode file. Please check the format.');
+                      setBarcodeFile(null);
+                      setBarcodeData(null);
+                      e.target.value = '';
+                    }
+                  }}
+                  className="hidden"
+                  id="barcode-file"
+                />
+                <button
+                  className={`mr-4 py-3 px-8 rounded-lg font-medium transition-colors ${
+                    barcodeFile
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  }`}
+                  onClick={() => document.getElementById('barcode-file')?.click()}
+                >
+                  {barcodeFile ? `${barcodeFile.name} Added` : 'Add Barcode File'}
+                </button>
                 <button
                   className={`py-3 px-8 rounded-lg font-medium transition-colors ${
-                    isMerging
+                    isMerging || !barcodeFile
                       ? 'bg-gray-400 cursor-not-allowed'
                       : 'bg-green-600 hover:bg-green-700 text-white'
                   }`}
-                  disabled={isMerging}
+                  disabled={isMerging || !barcodeFile}
                   onClick={async () => {
-                    if (!deFile?.content || !productFile?.content) return;
+                    if (!deFile?.content || !productFile?.content || !barcodeData) return;
                     
                     setIsMerging(true);
                     try {
-                      const merged = mergeFiles(deFile.content, productFile.content);
+                      const merged = mergeFiles(deFile.content, productFile.content, barcodeData);
                       setMergedData(merged);
                       // Save merged data
                       if (deFile) {

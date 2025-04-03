@@ -6,23 +6,20 @@ import { DBService, FileData } from './services/db';
 
 const db = new DBService();
 
-type TabType = 'de' | 'product';
+type TabType = 'de' | 'product' | 'merged';
 
 function App() {
   const [deFile, setDeFile] = React.useState<FileData | null>(null);
   const [productFile, setProductFile] = React.useState<FileData | null>(null);
-  const [barcodeFile, setBarcodeFile] = React.useState<FileData | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [activeTab, setActiveTab] = React.useState<TabType>('de');
   const [isProcessed, setIsProcessed] = React.useState(false);
   const [currentPage, setCurrentPage] = React.useState(1);
   const rowsPerPage = 5;
   const [dbInitialized, setDbInitialized] = React.useState(false);
-  const [isMerging, setIsMerging] = React.useState(false);
-  const [mergedData, setMergedData] = React.useState<any[] | null>(null);
-  const [barcodeData, setBarcodeData] = React.useState<any[] | null>(null);
   const tabsRef = React.useRef<HTMLDivElement>(null);
-  const mergedDataRef = React.useRef<HTMLDivElement>(null);
+  const [mergedData, setMergedData] = React.useState<any[] | null>(null);
+  const [isMerged, setIsMerged] = React.useState(false);
 
   const normalizeSKU = (sku: string): string => {
     if (!sku) return '';
@@ -40,206 +37,198 @@ function App() {
     return normalized.trim();
   };
 
-  const handleUniqueDE = (row: any) => {
-    const normalizedSKU = normalizeSKU(row.SKU);
-    const { Description, ...rest } = row;
-    return {
-      ...rest,
-      SKU: normalizedSKU,
-      Description: row['Description 1'] || '',
-      Barcode: ''
-    };
-  };
-
-  const handleUniqueProduct = (row: any) => {
-    const normalizedSKU = normalizeSKU(row.SKU);
-    const title = row.Name || '';
-    const parts = title.split(' ');
-    // Remove brand name (first word) and SKU
-    const cleanTitle = parts.slice(1).join(' ').replace(row.SKU, '').trim();
-
-    const descriptions = [
-      row['Description 1'],
-      row['Description 2'],
-      row['Description 3'],
-      row['Description 4'],
-      row['Description 5']
-    ].filter(Boolean);
+  const mergeFiles = () => {
+    if (!deFile?.content || !productFile?.content) return;
     
-    // Add specifications at the end after all descriptions
-    if (row['Specifications']) {
-      descriptions.push(row['Specifications']);
-    }
-
-    return {
-      SKU: normalizedSKU,
-      EAN: row.EAN,
-      Material: row.Material,
-      Title: cleanTitle,
-      Subcategory: row.Title,
-      Category: row.Category,
-      Brand: row.Brand,
-      'Product size': row['Product size'],
-      'Package size Length': row['Package size L'],
-      'Package size Width': row['Package size W'],
-      'Package size Height': row['Package size H'],
-      'Net weight': row['Net weight'],
-      'Gross weight': row['Gross weight'],
-      'Volume/CBM': row['Volume/CBM'],
-      Color: row.Color,
-      Description: descriptions.join('\n\n'),
-      Barcode: '',
-      ...Array.from({ length: 12 }, (_, i) => ({
-        [`image${i + 1}`]: row[`image${i + 1}`] || ''
-      })).reduce((acc, curr) => ({ ...acc, ...curr }), {})
-    };
-  };
-
-  const mergeRow = (deRow: any, productRow: any) => {
-    const normalizedSKU = normalizeSKU(deRow.SKU);
-    const title = productRow.Name || '';
-    const parts = title.split(' ');
-    const cleanTitle = parts.slice(1).join(' ').replace(productRow.SKU, '').trim();
-
-    // Merged description column order:
-    // 1. Description 1-5 from product information file
-    // 2. Description 1 from DE file
-    // 3. Specifications from product information file (at the end)
-    const descriptions = [
-      productRow['Description 1'],
-      productRow['Description 2'],
-      productRow['Description 3'],
-      productRow['Description 4'],
-      productRow['Description 5']
-    ].filter(Boolean);
+    setIsLoading(true);
     
-    // Then add description from the DE file
-    if (deRow['Description 1']) {
-      descriptions.push(deRow['Description 1']);
-    }
-    
-    // Add specifications at the end if they exist in product file
-    if (productRow['Specifications']) {
-      descriptions.push(productRow['Specifications']);
-    }
-  
-    const mergedRow: any = {
-      SKU: normalizedSKU,
-      EAN: deRow.EAN,
-      Subcategory: deRow.Category,
-      Price: deRow.Price,
-      Stock: deRow.Stock,
-      Material: productRow.Material,
-      Title: cleanTitle,
-      Category: productRow.Category,
-      Brand: productRow.Brand,
-      'Product size': productRow['Product size'],
-      'Package size Length': productRow['Package size L'],
-      'Package size Width': productRow['Package size W'],
-      'Package size Height': productRow['Package size H'],
-      'Net weight': productRow['Net weight'],
-      'Gross weight': productRow['Gross weight'],
-      'Volume/CBM': productRow['Volume/CBM'],
-      Color: productRow.Color,
-      Description: descriptions.join('\n\n'),
-      ...Array.from({ length: 12 }, (_, i) => ({
-        [`image${i + 1}`]: deRow[`image${i + 1}`] || ''
-      })).reduce((acc, curr) => ({ ...acc, ...curr }), {})
-    };
- 
-    if (barcodeData) {
-      const barcodeRow = barcodeData.find(row => normalizeSKU(row.SKU || '') === normalizedSKU);
-      if (barcodeRow) {
-        mergedRow.Barcode = barcodeRow.Barcode || barcodeRow.barcode;
-      }
-    }
- 
-    return mergedRow;
-  };
-
-  const mergeFiles = (deData: any[], productData: any[], barcodeData: any[]) => {
-    const deIndex = new Map();
-    const productIndex = new Map();
-    const barcodeIndex = new Map();
-    const merged: any[] = [];
-
-    // Index DE data
-    deData.forEach(row => {
-      const normalizedSKU = normalizeSKU(row.SKU);
-      if (normalizedSKU) {
-        deIndex.set(normalizedSKU, row);
-      }
-    });
-
-    // Index Product data
-    productData.forEach(row => {
-      const normalizedSKU = normalizeSKU(row.SKU);
-      if (normalizedSKU) {
-        productIndex.set(normalizedSKU, row);
-      }
-    });
-
-    // Index Barcode data
-    barcodeData.forEach(row => {
-      // Skip header rows or empty rows
-      if (!row.barcode && !row.Barcode && !row.SKU) return;
-
-      // Handle the different possible column names and normalizations
-      let barcode = row.barcode || row.Barcode;
-      let sku = row.SKU || row.sku;
+    try {
+      const deData = deFile.content;
+      const productData = productFile.content;
+      const mergedResults: any[] = [];
       
-      // Handle scientific notation in barcode (like 1.68071E+12)
-      if (barcode && typeof barcode === 'number') {
-        barcode = barcode.toString();
-      }
-
-      // If we have a valid SKU, add it to the index
-      if (sku) {
-        const normalizedSKU = normalizeSKU(sku);
-        if (normalizedSKU) {
-          barcodeIndex.set(normalizedSKU, { ...row, Barcode: barcode });
-        }
-      }
-      // If we don't have a SKU but have a barcode, we'll try to match it later
-      else if (barcode) {
-        // We'll use the barcode as a key in a separate index
-        barcodeIndex.set('barcode_' + barcode, { ...row, Barcode: barcode });
-      }
-    });
-
-    // Process matches and DE-only products
-    deIndex.forEach((deRow, normalizedSKU) => {
-      const productRow = productIndex.get(normalizedSKU);
-      const barcodeRow = barcodeIndex.get(normalizedSKU);
+      // Create normalized SKU maps for faster lookups
+      const deMap = new Map();
+      const productMap = new Map();
       
-      if (productRow) {
-        const mergedRow = mergeRow(deRow, productRow);
-        if (barcodeRow) {
-          mergedRow.Barcode = barcodeRow.Barcode;
+      // Populate DE map with normalized SKUs
+      deData.forEach(item => {
+        if (!item.SKU) return;
+        const normalizedSku = normalizeSKU(item.SKU);
+        deMap.set(normalizedSku, item);
+      });
+      
+      // Populate Product map with normalized SKUs
+      productData.forEach(item => {
+        if (!item.SKU) return;
+        const normalizedSku = normalizeSKU(item.SKU);
+        productMap.set(normalizedSku, item);
+      });
+      
+      // Process common products (exist in both files)
+      for (const [normalizedSku, deItem] of deMap.entries()) {
+        if (productMap.has(normalizedSku)) {
+          const productItem = productMap.get(normalizedSku);
+          
+          // Merge description fields for common products
+          const descriptions = [];
+          // First, add descriptions 1-5 from the product file
+          if (productItem) {
+            for (let i = 1; i <= 5; i++) {
+              const descKey = `Description ${i}`;
+              if (productItem[descKey]) descriptions.push(productItem[descKey]);
+            }
+          }
+          // Then, add description 1 from the DE file
+          if (deItem['Description 1']) descriptions.push(deItem['Description 1']);
+          
+          const mergedDescription = descriptions.join('\\n\\n');
+          
+          // Process title - remove brand and SKU
+          let title = productItem.Name || '';
+          if (title && productItem.Brand) {
+            // Remove brand name from title if it starts with it
+            if (title.startsWith(productItem.Brand)) {
+              title = title.substring(productItem.Brand.length).trim();
+            }
+            
+            // Remove SKU from title if present
+            const sku = deItem.SKU || productItem.SKU;
+            if (sku && title.includes(sku)) {
+              title = title.replace(sku, '').trim();
+            }
+          }
+          
+          // Create merged product with index signature
+          const mergedProduct: { [key: string]: any } = {
+            SKU: deItem.SKU,
+            EAN: deItem.EAN,
+            Subcategory: deItem.Category,
+            Category: productItem.Category,
+            Price: deItem.Price,
+            Stock: deItem.Stock,
+            Material: productItem.Material,
+            Title: title,
+            Brand: productItem.Brand,
+            'Product size': productItem['Product size/cm'],
+            'Package size Length': productItem['Package size/cm L'],
+            'Package size Width': productItem['Package size/cm W'],
+            'Package size Height': productItem['Package size/cm H'],
+            'Net weight': productItem['Net weight/kg'],
+            'Gross weight': productItem['Gross weight/kg'],
+            'Volume/CBM': productItem['Volume/CBM'],
+            Color: productItem.Color,
+            description: mergedDescription,
+          };
+          
+          // Add image URLs
+          for (let i = 1; i <= 12; i++) {
+            const imageKey = `image${i}`;
+            if (deItem[imageKey]) mergedProduct[imageKey] = deItem[imageKey];
+          }
+          
+          mergedResults.push(mergedProduct);
+          
+          // Remove processed items from maps to identify unique products later
+          productMap.delete(normalizedSku);
+        } else {
+          // Products only in DE file with index signature
+          const deSoloProduct: { [key: string]: any } = {
+            SKU: deItem.SKU,
+            EAN: deItem.EAN,
+            Brand: deItem.Brand || '',
+            Category: deItem.Category,
+            Title: deItem.Title || '',
+            Price: deItem.Price,
+            Stock: deItem.Stock,
+            description: deItem['Description 1'] || '',
+          };
+          
+          // Add image URLs
+          for (let i = 1; i <= 12; i++) {
+            const imageKey = `image${i}`;
+            if (deItem[imageKey]) deSoloProduct[imageKey] = deItem[imageKey];
+          }
+          
+          mergedResults.push(deSoloProduct);
         }
-        merged.push(mergedRow);
-      } else {
-        const uniqueRow = handleUniqueDE(deRow);
-        if (barcodeRow) {
-          uniqueRow.Barcode = barcodeRow.Barcode;
-        }
-        merged.push(uniqueRow);
       }
-    });
-
-    // Process Product-only entries
-    productIndex.forEach((productRow, normalizedSKU) => {
-      if (!deIndex.has(normalizedSKU)) {
-        const uniqueRow = handleUniqueProduct(productRow);
-        const barcodeRow = barcodeIndex.get(normalizedSKU);
-        if (barcodeRow) {
-          uniqueRow.Barcode = barcodeRow.Barcode;
+      
+      // Process products only in Product Information file
+      for (const [normalizedSku, productItem] of productMap.entries()) {
+        // Process title - remove brand and SKU
+        let title = productItem.Name || '';
+        if (title && productItem.Brand) {
+          // Remove brand name from title if it starts with it
+          if (title.startsWith(productItem.Brand)) {
+            title = title.substring(productItem.Brand.length).trim();
+          }
+          
+          // Remove SKU from title if present
+          if (productItem.SKU && title.includes(productItem.SKU)) {
+            title = title.replace(productItem.SKU, '').trim();
+          }
         }
-        merged.push(uniqueRow);
+        
+        // Merge descriptions for Product Info only products
+        const descriptions = [];
+        for (let i = 1; i <= 5; i++) {
+          const descKey = `Description ${i}`;
+          if (productItem[descKey]) descriptions.push(productItem[descKey]);
+        }
+        // Include Specifications as per original Instruction #5
+        if (productItem.Specifications) {
+          descriptions.push(productItem.Specifications);
+        }
+        
+        const mergedDescription = descriptions.join('\\n\\n');
+        
+        // Create product info only product with index signature
+        const productInfoOnly: { [key: string]: any } = {
+          SKU: productItem.SKU,
+          EAN: productItem.EAN || '',
+          Material: productItem.Material,
+          Title: title,
+          Subcategory: productItem.Title || '',
+          Category: productItem.Category,
+          Brand: productItem.Brand,
+          'Product size': productItem['Product size/cm'],
+          'Package size Length': productItem['Package size/cm L'],
+          'Package size Width': productItem['Package size/cm W'],
+          'Package size Height': productItem['Package size/cm H'],
+          'Net weight': productItem['Net weight/kg'],
+          'Gross weight': productItem['Gross weight/kg'],
+          'Volume/CBM': productItem['Volume/CBM'],
+          Color: productItem.Color,
+          description: mergedDescription,
+        };
+        
+        // Add image URLs
+        for (let i = 1; i <= 12; i++) {
+          const imageKey = `image${i}`;
+          if (productItem[imageKey]) productInfoOnly[imageKey] = productItem[imageKey];
+        }
+        
+        mergedResults.push(productInfoOnly);
       }
-    });
-
-    return merged;
+      
+      setMergedData(mergedResults);
+      setIsMerged(true);
+      
+      // Save merged data to DB
+      const updatedDeFile = {...deFile, mergedData: mergedResults};
+      setDeFile(updatedDeFile);
+      db.saveFile(updatedDeFile);
+      
+      // Switch to merged tab
+      setActiveTab('merged');
+      
+    } catch (error) {
+      console.error('Error merging files:', error);
+      alert('Error merging files. Please check the file structure and try again.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const downloadCSV = (data: any[]) => {
@@ -248,82 +237,99 @@ function App() {
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', 'merged_data.csv');
+    link.setAttribute('download', 'data.csv');
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
   const downloadXLSX = (data: any[]) => {
-    const worksheet = XLSX.utils.json_to_sheet(data);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "MergedData");
-    XLSX.writeFile(workbook, "merged_data.xlsx");
+    try {
+      // Clean the data to ensure it's properly serializable
+      const cleanData = data.map(row => {
+        const cleanRow: {[key: string]: any} = {};
+        Object.keys(row).forEach(key => {
+          // Handle undefined, null, or complex objects
+          if (row[key] === undefined || row[key] === null) {
+            cleanRow[key] = '';
+          } else if (typeof row[key] === 'object') {
+            cleanRow[key] = JSON.stringify(row[key]);
+          } else {
+            cleanRow[key] = row[key];
+          }
+        });
+        return cleanRow;
+      });
+      
+      const worksheet = XLSX.utils.json_to_sheet(cleanData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
+      
+      // Use buffer-based approach for more consistent results
+      const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/octet-stream' });
+      
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'data.xlsx';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error exporting to XLSX:', error);
+      alert('Error exporting to XLSX. Trying downloading as CSV instead.');
+    }
   };
 
   React.useEffect(() => {
     const initDB = async () => {
       try {
         await db.init();
-        const [savedDeFile, savedProductFile] = await Promise.all([
-          db.getFile('deFile'),
-          db.getFile('productFile')
-        ]);
-        
-        if (savedDeFile) {
-          setDeFile(savedDeFile);
-          if (savedDeFile.mergedData) {
-            setMergedData(savedDeFile.mergedData);
-          }
-          if (savedDeFile.content) {
-            setIsProcessed(true);
-          }
-        }
-        if (savedProductFile) {
-          setProductFile(savedProductFile);
-        }
         setDbInitialized(true);
+        console.log('DB initialized successfully');
       } catch (error) {
-        console.error('Failed to initialize DB:', error);
+        console.error('Error initializing DB:', error);
       }
     };
-    
+
     initDB();
   }, []);
 
   React.useEffect(() => {
-    const updateDB = async () => {
+    if (!dbInitialized) return;
+
+    const loadFiles = async () => {
       try {
-        if (deFile) {
-          await db.saveFile({ ...deFile, id: 'deFile' });
-        } else {
-          await db.deleteFile('deFile');
+        const savedDeFile = await db.getFile('deFile');
+        const savedProductFile = await db.getFile('productFile');
+
+        if (savedDeFile) setDeFile(savedDeFile);
+        if (savedProductFile) setProductFile(savedProductFile);
+
+        if (savedDeFile && savedProductFile) {
+          setIsProcessed(true);
         }
       } catch (error) {
-        console.error('Failed to update DE file:', error);
+        console.error('Error loading saved files:', error);
       }
-    }
-    if (dbInitialized) {
-      updateDB();
-    }
-  }, [deFile, dbInitialized]);
+    };
+
+    loadFiles();
+  }, [dbInitialized]);
 
   React.useEffect(() => {
     const updateDB = async () => {
-      try {
-        if (productFile) {
-          await db.saveFile({ ...productFile, id: 'productFile' });
-        } else {
-          await db.deleteFile('productFile');
-        }
-      } catch (error) {
-        console.error('Failed to update Product file:', error);
-      }
-    }
+      if (deFile) await db.saveFile(deFile);
+      if (productFile) await db.saveFile(productFile);
+    };
+
     if (dbInitialized) {
       updateDB();
     }
-  }, [productFile, dbInitialized]);
+  }, [deFile, productFile, dbInitialized]);
 
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
@@ -332,23 +338,23 @@ function App() {
   const handleClear = () => {
     setDeFile(null);
     setProductFile(null);
-    setBarcodeFile(null);
-    setBarcodeData(null);
-    setMergedData(null);
-    setMergedData(null);
     setIsProcessed(false);
     setCurrentPage(1);
-    // Reset file input elements
+    
+    // Clear file inputs
     const deInput = document.getElementById('de-file') as HTMLInputElement;
     const productInput = document.getElementById('product-file') as HTMLInputElement;
-    const barcodeInput = document.getElementById('barcode-file') as HTMLInputElement;
+    
     if (deInput) deInput.value = '';
     if (productInput) productInput.value = '';
-    if (barcodeInput) barcodeInput.value = '';
+    
+    // Clear database
+    db.deleteFile('deFile');
+    db.deleteFile('productFile');
   };
 
   const parseFile = async (file: File): Promise<any[]> => {
-    const fileType = file.name.split('.').pop()?.toLowerCase();
+    const fileType = file.name.split('.').pop()?.toLowerCase() || '';
     
     if (fileType === 'csv') {
       return parseCsvFile(file);
@@ -438,7 +444,7 @@ function App() {
     } as FileData);
   };
 
-  const renderTable = (data: any[] | undefined) => {
+  const renderTable = (data: any[] | undefined | null) => {
     if (!data || data.length === 0) return null;
     
     const totalPages = Math.ceil(data.length / rowsPerPage);
@@ -574,6 +580,37 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* Add Merge Files and Download Buttons */}
+        {activeTab !== 'merged' && isProcessed && !isMerged && (
+          <div className="mt-4 flex justify-center">
+            <button
+              onClick={mergeFiles}
+              className="py-3 px-8 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+            >
+              Merge Files
+            </button>
+          </div>
+        )}
+        
+        {activeTab === 'merged' && mergedData && mergedData.length > 0 && (
+          <div className="mt-4 flex justify-center space-x-4">
+            <button
+              onClick={() => downloadCSV(mergedData)}
+              className="flex items-center gap-2 py-2 px-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Download CSV
+            </button>
+            <button
+              onClick={() => downloadXLSX(mergedData)}
+              className="flex items-center gap-2 py-2 px-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Download XLSX
+            </button>
+          </div>
+        )}
       </div>
     );
   };
@@ -585,7 +622,7 @@ function App() {
           <div className="bg-white rounded-lg p-6 flex flex-col items-center">
             <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
             <p className="mt-4 text-gray-700 font-medium">
-              {isMerging ? 'Merging Files...' : 'Processing Files...'}
+              {isMerged ? 'Merging Files...' : 'Processing Files...'}
             </p>
           </div>
         </div>
@@ -745,168 +782,31 @@ function App() {
                   <TableIcon className="w-4 h-4" />
                   Product Information Data
                 </button>
+                {isMerged && (
+                  <button
+                    onClick={() => setActiveTab('merged')}
+                    className={`
+                      flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm
+                      ${activeTab === 'merged'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }
+                    `}
+                  >
+                    <TableIcon className="w-4 h-4" />
+                    Merged Data
+                  </button>
+                )}
               </nav>
             </div>
             <div className="mt-4 overflow-hidden">
-              {activeTab === 'de' ? renderTable(deFile?.content) : renderTable(productFile?.content)}
+              {activeTab === 'de' 
+                ? renderTable(deFile?.content) 
+                : activeTab === 'product' 
+                  ? renderTable(productFile?.content)
+                  : mergedData && renderTable(mergedData)
+              }
             </div>
-            {mergedData && (
-              <div className="mt-6" ref={mergedDataRef}>
-                <h2 className="text-lg font-semibold mb-4">Merged Data</h2>
-                {renderTable(mergedData)}
-                <div className="mt-4 flex justify-center">
-                  <div className="relative inline-block">
-                    <button
-                      className="flex items-center gap-2 py-3 px-8 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
-                      onClick={() => {
-                        const dropdown = document.getElementById('download-dropdown');
-                        if (dropdown) {
-                          dropdown.classList.toggle('hidden');
-                        }
-                      }}
-                    >
-                      <Download className="w-5 h-5" />
-                      Download As
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                    <div id="download-dropdown" className="hidden absolute left-full ml-2 top-0 z-10 w-56 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
-                      <div className="py-1">
-                        <button
-                          onClick={() => {
-                            downloadCSV(mergedData);
-                            document.getElementById('download-dropdown')?.classList.add('hidden');
-                          }}
-                          className="text-gray-700 block w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
-                        >
-                          CSV (.csv)
-                        </button>
-                        <button
-                          onClick={() => {
-                            downloadXLSX(mergedData);
-                            document.getElementById('download-dropdown')?.classList.add('hidden');
-                          }}
-                          className="text-gray-700 block w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
-                        >
-                          Excel (.xlsx)
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-            {!mergedData && (
-              <div className="mt-6 flex justify-center">
-                <input
-                  type="file"
-                  accept=".csv,.xls,.xlsx"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    
-                    const fileType = file.name.split('.').pop()?.toLowerCase();
-                    if (!['csv', 'xls', 'xlsx'].includes(fileType || '')) {
-                      alert('Please upload only CSV, XLS, or XLSX files');
-                      e.target.value = '';
-                      return;
-                    }
-                    
-                    setBarcodeFile({
-                      id: 'productFile',
-                      name: file.name,
-                      type: fileType || '',
-                      size: file.size,
-                    } as FileData);
-                    
-                    try {
-                      const parsedData = await parseFile(file);
-                      // Clean up and normalize barcode data
-                      const cleanedData = parsedData.map(row => {
-                        // Create a normalized object with consistent property names
-                        const cleanRow: any = {};
-                        
-                        // Handle different column name variations
-                        Object.keys(row).forEach(key => {
-                          const lowerKey = key.toLowerCase();
-                          
-                          // Handle barcode field
-                          if (lowerKey.includes('barcode')) {
-                            let barcode = row[key];
-                            // Convert scientific notation to string
-                            if (typeof barcode === 'number') {
-                              barcode = barcode.toString();
-                            }
-                            cleanRow.Barcode = barcode;
-                          } 
-                          // Handle SKU field
-                          else if (lowerKey === 'sku') {
-                            cleanRow.SKU = row[key];
-                          } 
-                          // Copy other fields as is
-                          else {
-                            cleanRow[key] = row[key];
-                          }
-                        });
-                        
-                        return cleanRow;
-                      }).filter(row => row.Barcode || row.SKU); // Filter out empty rows
-                      
-                      setBarcodeData(cleanedData);
-                    } catch (error) {
-                      console.error('Error parsing barcode file:', error);
-                      alert('Error parsing barcode file. Please check the format.');
-                      setBarcodeFile(null);
-                      setBarcodeData(null);
-                      e.target.value = '';
-                    }
-                  }}
-                  className="hidden"
-                  id="barcode-file"
-                />
-                <button
-                  className={`mr-4 py-3 px-8 rounded-lg font-medium transition-colors ${
-                    barcodeFile
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-blue-600 hover:bg-blue-700 text-white'
-                  }`}
-                  onClick={() => document.getElementById('barcode-file')?.click()}
-                >
-                  {barcodeFile ? `${barcodeFile.name} Added` : 'Add Barcode File'}
-                </button>
-                <button
-                  className={`py-3 px-8 rounded-lg font-medium transition-colors ${
-                    isMerging || !barcodeFile
-                      ? 'bg-gray-400 cursor-not-allowed'
-                      : 'bg-green-600 hover:bg-green-700 text-white'
-                  }`}
-                  disabled={isMerging || !barcodeFile}
-                  onClick={async () => {
-                    if (!deFile?.content || !productFile?.content || !barcodeData) return;
-                    
-                    setIsMerging(true);
-                    try {
-                      const merged = mergeFiles(deFile.content, productFile.content, barcodeData);
-                      setMergedData(merged);
-                      // Save merged data
-                      if (deFile) {
-                        await db.saveFile({ ...deFile, mergedData: merged });
-                      }
-                      // Wait for state update before scrolling
-                      setTimeout(() => {
-                        mergedDataRef.current?.scrollIntoView({ behavior: 'smooth' });
-                      }, 100);
-                    } catch (error) {
-                      console.error('Error merging files:', error);
-                      alert('Error merging files. Please check the console for details.');
-                    } finally {
-                      setIsMerging(false);
-                    }
-                  }}
-                >
-                  {isMerging ? 'Merging...' : 'Merge Files'}
-                </button>
-              </div>
-            )}
           </div>
         )}
       </div>

@@ -63,9 +63,13 @@ function App() {
       row['Description 2'],
       row['Description 3'],
       row['Description 4'],
-      row['Description 5'],
-      row['Specifications']
-    ].filter(Boolean).join('\n\n');
+      row['Description 5']
+    ].filter(Boolean);
+    
+    // Add specifications at the end after all descriptions
+    if (row['Specifications']) {
+      descriptions.push(row['Specifications']);
+    }
 
     return {
       SKU: normalizedSKU,
@@ -83,7 +87,7 @@ function App() {
       'Gross weight': row['Gross weight'],
       'Volume/CBM': row['Volume/CBM'],
       Color: row.Color,
-      Description: descriptions,
+      Description: descriptions.join('\n\n'),
       Barcode: '',
       ...Array.from({ length: 12 }, (_, i) => ({
         [`image${i + 1}`]: row[`image${i + 1}`] || ''
@@ -97,14 +101,27 @@ function App() {
     const parts = title.split(' ');
     const cleanTitle = parts.slice(1).join(' ').replace(productRow.SKU, '').trim();
 
+    // Merged description column order:
+    // 1. Description 1-5 from product information file
+    // 2. Description 1 from DE file
+    // 3. Specifications from product information file (at the end)
     const descriptions = [
-      deRow['Description 1'],
       productRow['Description 1'],
       productRow['Description 2'],
       productRow['Description 3'],
       productRow['Description 4'],
       productRow['Description 5']
-    ].filter(Boolean).join('\n\n');
+    ].filter(Boolean);
+    
+    // Then add description from the DE file
+    if (deRow['Description 1']) {
+      descriptions.push(deRow['Description 1']);
+    }
+    
+    // Add specifications at the end if they exist in product file
+    if (productRow['Specifications']) {
+      descriptions.push(productRow['Specifications']);
+    }
   
     const mergedRow: any = {
       SKU: normalizedSKU,
@@ -124,7 +141,7 @@ function App() {
       'Gross weight': productRow['Gross weight'],
       'Volume/CBM': productRow['Volume/CBM'],
       Color: productRow.Color,
-      Description: descriptions,
+      Description: descriptions.join('\n\n'),
       ...Array.from({ length: 12 }, (_, i) => ({
         [`image${i + 1}`]: deRow[`image${i + 1}`] || ''
       })).reduce((acc, curr) => ({ ...acc, ...curr }), {})

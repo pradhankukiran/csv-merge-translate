@@ -6,7 +6,7 @@ import { DBService, FileData } from './services/db';
 
 const db = new DBService();
 
-type TabType = 'de' | 'product' | 'merged';
+type TabType = 'de' | 'product' | 'merged' | 'translated';
 
 function App() {
   const [deFile, setDeFile] = React.useState<FileData | null>(null);
@@ -20,6 +20,11 @@ function App() {
   const tabsRef = React.useRef<HTMLDivElement>(null);
   const [mergedData, setMergedData] = React.useState<any[] | null>(null);
   const [isMerged, setIsMerged] = React.useState(false);
+  const [isTranslating, setIsTranslating] = React.useState(false);
+  const [translationProgress, setTranslationProgress] = React.useState(0);
+  const [translatedData, setTranslatedData] = React.useState<any[] | null>(null);
+  const [isTranslated, setIsTranslated] = React.useState(false);
+  const [deeplApiKey, setDeeplApiKey] = React.useState<string>('');
 
   const normalizeSKU = (sku: string): string => {
     if (!sku) return '';
@@ -82,7 +87,7 @@ function App() {
           // Then, add description 1 from the DE file
           if (deItem['Description 1']) descriptions.push(deItem['Description 1']);
           
-          const mergedDescription = descriptions.join('\\n\\n');
+          const mergedDescription = descriptions.join('\n\n');
           
           // Process title - remove brand and SKU
           let title = productItem.Name || '';
@@ -101,7 +106,7 @@ function App() {
           
           // Create merged product with index signature
           const mergedProduct: { [key: string]: any } = {
-            SKU: deItem.SKU,
+            SKU: normalizedSku,
             EAN: deItem.EAN,
             Subcategory: deItem.Category,
             Category: productItem.Category,
@@ -134,7 +139,7 @@ function App() {
         } else {
           // Products only in DE file with index signature
           const deSoloProduct: { [key: string]: any } = {
-            SKU: deItem.SKU,
+            SKU: normalizedSku,
             EAN: deItem.EAN,
             Brand: deItem.Brand || '',
             Category: deItem.Category,
@@ -181,11 +186,11 @@ function App() {
           descriptions.push(productItem.Specifications);
         }
         
-        const mergedDescription = descriptions.join('\\n\\n');
+        const mergedDescription = descriptions.join('\n\n');
         
         // Create product info only product with index signature
         const productInfoOnly: { [key: string]: any } = {
-          SKU: productItem.SKU,
+          SKU: normalizedSku,
           EAN: productItem.EAN || '',
           Material: productItem.Material,
           Title: title,
@@ -339,6 +344,10 @@ function App() {
     setDeFile(null);
     setProductFile(null);
     setIsProcessed(false);
+    setIsMerged(false);
+    setMergedData(null);
+    setIsTranslated(false);
+    setTranslatedData(null);
     setCurrentPage(1);
     
     // Clear file inputs
@@ -488,7 +497,9 @@ function App() {
                       key={header} 
                       className="px-6 py-4 text-sm text-gray-500 min-w-[200px] max-w-[300px]"
                     >
-                      <div className="truncate">
+                      <div className={`${header.toLowerCase() === 'description' ? 
+                        'whitespace-pre-wrap break-words max-w-[500px] max-h-[200px] overflow-auto' : 
+                        'truncate'}`}>
                         {isUrlContent ? (
                           <a 
                             href={content}
@@ -594,7 +605,32 @@ function App() {
         )}
         
         {activeTab === 'merged' && mergedData && mergedData.length > 0 && (
-          <div className="mt-4 flex justify-center space-x-4">
+          <div className="flex flex-wrap gap-4 mt-4 justify-end">
+            <button
+              onClick={translateMergedData}
+              disabled={isTranslating}
+              className={`flex items-center gap-2 py-2 px-4 rounded-lg font-medium ${
+                isTranslating 
+                  ? 'bg-blue-300 cursor-not-allowed' 
+                  : 'bg-blue-600 hover:bg-blue-700 text-white transition-colors'
+              }`}
+            >
+              {isTranslating ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  Translating with DeepL ({translationProgress}%)
+                </>
+              ) : (
+                <>Translate with DeepL</>
+              )}
+            </button>
+            <input
+              type="password"
+              placeholder="DeepL API Key (required)"
+              value={deeplApiKey}
+              onChange={(e) => setDeeplApiKey(e.target.value)}
+              className="py-2 px-4 border border-gray-300 rounded-lg text-sm"
+            />
             <button
               onClick={() => downloadCSV(mergedData)}
               className="flex items-center gap-2 py-2 px-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
@@ -611,8 +647,124 @@ function App() {
             </button>
           </div>
         )}
+
+        {activeTab === 'translated' && translatedData && (
+          <div className="flex flex-wrap gap-4 mt-4 justify-end">
+            <button
+              onClick={() => downloadCSV(translatedData)}
+              className="flex items-center gap-2 py-2 px-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Download Translated CSV
+            </button>
+            <button
+              onClick={() => downloadXLSX(translatedData)}
+              className="flex items-center gap-2 py-2 px-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Download Translated XLSX
+            </button>
+          </div>
+        )}
       </div>
     );
+  };
+
+  // Translation function for text content
+  const translateText = async (text: string): Promise<string> => {
+    if (!text) return '';
+    
+    try {
+      // DeepL API integration
+      const apiKey = deeplApiKey || process.env.REACT_APP_DEEPL_API_KEY;
+      
+      if (!apiKey) {
+        throw new Error("DeepL API key is required for translation");
+      }
+      
+      const response = await fetch('https://api-free.deepl.com/v2/translate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `DeepL-Auth-Key ${apiKey}`
+        },
+        body: JSON.stringify({
+          text: [text],
+          target_lang: 'EN'
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`DeepL API error: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      return data.translations[0].text;
+    } catch (error) {
+      console.error('Translation error:', error);
+      return text; // Return original text if translation fails
+    }
+  };
+  
+  // Function to translate all the merged data
+  const translateMergedData = async () => {
+    if (!mergedData) return;
+    
+    if (!deeplApiKey) {
+      alert('Please enter your DeepL API key to translate the content.');
+      return;
+    }
+    
+    setIsTranslating(true);
+    setTranslationProgress(0);
+    
+    try {
+      const translatedItems = [];
+      const totalItems = mergedData.length;
+      
+      for (let i = 0; i < totalItems; i++) {
+        const item = mergedData[i];
+        const translatedItem = { ...item };
+        
+        // Translate text fields - focusing on title and description
+        if (item.Title) {
+          translatedItem.Title = await translateText(item.Title);
+        }
+        
+        if (item.description) {
+          // For multi-paragraph descriptions, translate each paragraph
+          const paragraphs = item.description.split('\n\n');
+          const translatedParagraphs = [];
+          
+          for (const paragraph of paragraphs) {
+            translatedParagraphs.push(await translateText(paragraph));
+          }
+          
+          translatedItem.description = translatedParagraphs.join('\n\n');
+        }
+        
+        // Additionally translate any other fields that may contain text in German
+        // Such as Category, Material, Brand, Color, etc.
+        if (item.Category) translatedItem.Category = await translateText(item.Category);
+        if (item.Subcategory) translatedItem.Subcategory = await translateText(item.Subcategory);
+        if (item.Material) translatedItem.Material = await translateText(item.Material);
+        if (item.Color) translatedItem.Color = await translateText(item.Color);
+        
+        translatedItems.push(translatedItem);
+        
+        // Update progress
+        setTranslationProgress(Math.round(((i + 1) / totalItems) * 100));
+      }
+      
+      setTranslatedData(translatedItems);
+      setIsTranslated(true);
+      setActiveTab('translated');
+    } catch (error) {
+      console.error('Translation error:', error);
+      alert('An error occurred during translation. Please try again.');
+    } finally {
+      setIsTranslating(false);
+    }
   };
 
   return (
@@ -622,7 +774,8 @@ function App() {
           <div className="bg-white rounded-lg p-6 flex flex-col items-center">
             <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
             <p className="mt-4 text-gray-700 font-medium">
-              {isMerged ? 'Merging Files...' : 'Processing Files...'}
+              {isTranslating ? `Translating... (${translationProgress}%)` : 
+               isMerged ? 'Merging Files...' : 'Processing Files...'}
             </p>
           </div>
         </div>
@@ -797,6 +950,21 @@ function App() {
                     Merged Data
                   </button>
                 )}
+                {isTranslated && (
+                  <button
+                    onClick={() => setActiveTab('translated')}
+                    className={`
+                      flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm
+                      ${activeTab === 'translated'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }
+                    `}
+                  >
+                    <TableIcon className="w-4 h-4" />
+                    Translated Data
+                  </button>
+                )}
               </nav>
             </div>
             <div className="mt-4 overflow-hidden">
@@ -804,7 +972,9 @@ function App() {
                 ? renderTable(deFile?.content) 
                 : activeTab === 'product' 
                   ? renderTable(productFile?.content)
-                  : mergedData && renderTable(mergedData)
+                  : activeTab === 'merged' 
+                    ? mergedData && renderTable(mergedData)
+                    : translatedData && renderTable(translatedData)
               }
             </div>
           </div>
